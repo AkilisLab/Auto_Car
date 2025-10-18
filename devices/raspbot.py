@@ -393,7 +393,7 @@ class LightShow:
         self.running = False
 
 # test
-car = Raspbot()
+# car = Raspbot()
 
 #读取巡线传感器地址 ,此值只有1位
 # track =car.read_data_array(0x0a,1)
@@ -478,3 +478,11 @@ car = Raspbot()
 #     car.Ctrl_WQ2812_brightness_ALL(i,0,0)
 #     time.sleep(0.01)
 # car.Ctrl_WQ2812_ALL(0,0) #关闭
+
+#test light
+# light = LightShow()
+# light.execute_effect('gradient',10,0.1,0)
+# light.execute_effect('river',10,0.05,0)
+# light.execute_effect('breathing',10,0.02,3)
+# light.execute_effect('random_running',10,0.1,0)
+# light.execute_effect('starlight',10,0.1,0)

@@ -3,7 +3,8 @@
 
 Controls (press-and-hold semantics):
   w: forward
-  s: backward
+  s: stop
+  x: backward
   a: left
   d: right
   q: LED effect on
@@ -13,8 +14,8 @@ Servo controls:
   h: servo left (decrease angle)
   j: servo mid (decrease angle)
   k: servo right (decrease angle)
-  u: servo left (increase angle)
-  m: servo right (increase angle)
+  u: servo up (increase angle)
+  m: servo down (increase angle)
 
 Press Ctrl-C to exit. This script uses the I2C Raspbot interface in
 `devices/raspbot.py` (Raspbot class).
@@ -27,6 +28,9 @@ import threading
 import time
 
 from devices.raspbot import Raspbot
+from control.car_action import CarActions
+from devices.camera_node import Camera
+import cv2
 
 
 def manual_control():
@@ -45,7 +49,80 @@ def manual_control():
     # Continuous action thread for movement keys
     action_thread = None
     action_stop = threading.Event()
-    current_action = None
+
+    # car action helpers
+    actions = CarActions(bot, base_speed=base_speed)
+
+    # camera preview thread control
+    # create a persistent Camera instance and a background thread that
+    # keeps the capture open. We only toggle whether frames are shown
+    # in the window to avoid repeatedly opening/closing the VideoCapture
+    # (which can trigger Qt plugin/windowing errors on some systems).
+    camera = Camera(index=0, width=640, height=480, fps=15)
+    camera_thread = None
+    camera_stop = threading.Event()
+    # when True the background thread will call cv2.imshow; toggling
+    # this avoids reopening the capture. Note: the thread may start on
+    # first request and will be stopped and capture released on program
+    # exit.
+    camera_show = False
+
+    def start_camera():
+        """Start showing camera frames. The background thread is started
+        on first use and keeps the capture open. Subsequent calls only
+        toggle showing frames in the window."""
+        nonlocal camera_thread, camera_stop, camera_show
+        # start the background thread if needed
+        if camera_thread is None or not camera_thread.is_alive():
+            camera_stop.clear()
+
+            def cam_loop():
+                nonlocal camera_show
+                try:
+                    # prefer background reader which keeps the cap open
+                    if not camera.start():
+                        camera.open()
+                    while not camera_stop.is_set():
+                        ret, frame = camera.read(wait=True)
+                        if camera_show and ret and frame is not None:
+                            try:
+                                cv2.imshow('Camera', frame)
+                                if cv2.waitKey(1) & 0xFF == ord('q'):
+                                    # allow hiding the window with 'q'
+                                    camera_show = False
+                                    try:
+                                        cv2.destroyWindow('Camera')
+                                    except Exception:
+                                        pass
+                            except Exception:
+                                # display may fail on headless systems; ignore
+                                pass
+                        else:
+                            # not showing frames; sleep briefly
+                            time.sleep(0.05)
+                    try:
+                        cv2.destroyWindow('Camera')
+                    except Exception:
+                        pass
+                finally:
+                    try:
+                        camera.close()
+                    except Exception:
+                        pass
+
+            camera_thread = threading.Thread(target=cam_loop, daemon=True)
+            camera_thread.start()
+            # small delay to let the thread open camera if needed
+            time.sleep(0.05)
+
+        # request that the window show frames
+        camera_show = True
+
+    def stop_camera():
+        nonlocal camera_show
+        # hide frames, but keep the background thread and capture alive
+        # so we can quickly re-show without reopening the VideoCapture.
+        camera_show = False
 
     fd = sys.stdin.fileno()
     old_settings = termios.tcgetattr(fd)
@@ -53,25 +130,11 @@ def manual_control():
     try:
         tty.setcbreak(fd)
         # --- helper functions to reduce duplication ---
-        def stop_motors():
-            bot.Ctrl_Car(0, 0, 0)
-            bot.Ctrl_Car(1, 0, 0)
-            bot.Ctrl_Car(2, 0, 0)
-            bot.Ctrl_Car(3, 0, 0)
-
-        def set_all_motors(direction, speed):
-            # direction: 0 forward, 1 backward
-            for mid in range(4):
-                bot.Ctrl_Car(mid, direction, speed)
-
-        def blink_all(color, on_time=0.12, off_time=0.12):
-            bot.Ctrl_WQ2812_ALL(1, color)
-            time.sleep(on_time)
-            bot.Ctrl_WQ2812_ALL(0, 0)
-            time.sleep(off_time)
+        # Use CarActions helpers
+        # wrappers removed - use actions.* methods directly
 
         def launch_action(name, fn):
-            nonlocal action_thread, action_stop, current_action
+            nonlocal action_thread, action_stop
             # stop previous action
             if action_thread is not None and action_thread.is_alive():
                 action_stop.set()
@@ -117,69 +180,31 @@ def manual_control():
 
             # movement mapping (simple differential control)
             if ch == 'w':
-                def action_forward():
-                    try:
-                        while not action_stop.is_set():
-                            set_all_motors(0, base_speed)
-                            blink_all(2)
-                    finally:
-                        stop_motors()
-
-                launch_action('w', action_forward)
+                launch_action('w', lambda: actions.forward_loop(action_stop))
             elif ch == 'x':
-                def action_backward():
-                    try:
-                        while not action_stop.is_set():
-                            set_all_motors(1, base_speed)
-                            blink_all(0)
-                    finally:
-                        stop_motors()
-
-                launch_action('x', action_backward)
+                launch_action('x', lambda: actions.backward_loop(action_stop))
             elif ch == 'a':
-                def action_left():
-                    try:
-                        while not action_stop.is_set():
-                            bot.Ctrl_Car(0, 1, int(base_speed * 0.3))
-                            bot.Ctrl_Car(1, 1, int(base_speed * 0.3))
-                            bot.Ctrl_Car(2, 0, int(base_speed * 0.3))
-                            bot.Ctrl_Car(3, 0, int(base_speed * 0.3))
-                            # blink LEDs while turning
-                            blink_all(1)
-                    finally:
-                        stop_motors()
-
-                launch_action('a', action_left)
+                launch_action('a', lambda: actions.left_loop(action_stop))
             elif ch == 'd':
-                def action_right():
-                    try:
-                        while not action_stop.is_set():
-                            bot.Ctrl_Car(0, 0, int(base_speed * 0.3))
-                            bot.Ctrl_Car(1, 0, int(base_speed * 0.3))
-                            bot.Ctrl_Car(2, 1, int(base_speed * 0.3))
-                            bot.Ctrl_Car(3, 1, int(base_speed * 0.3))
-                            # blink LEDs while turning
-                            blink_all(2)
-                    finally:
-                        stop_motors()
-
-                launch_action('d', action_right)
+                launch_action('d', lambda: actions.right_loop(action_stop))
             elif ch == 's' or ch == ' ':
                 # Launch a persistent stop action that holds motors off until
                 # another action is launched.
-                def action_stop_motors():
-                    try:
-                        # actively keep motors off until stop signaled
-                        while not action_stop.is_set():
-                            stop_motors()
-                            time.sleep(0.05)
-                    finally:
-                        stop_motors()
-
-                launch_action('stop', action_stop_motors)
+                launch_action('stop', lambda: actions.stop_loop(action_stop))
             # LEDs
             elif ch == 'q':
                 launch_led_effect()
+            elif ch == 'v':
+                # toggle camera preview. We keep the VideoCapture open in a
+                # background thread and only toggle whether frames are shown
+                # to avoid repeated open/close which can trigger Qt plugin
+                # errors.
+                if camera_show:
+                    stop_camera()
+                    print('Camera stopped')
+                else:
+                    start_camera()
+                    print('Camera started (press v again to stop)')
             elif ch == 'e':
                 bot.Ctrl_WQ2812_ALL(0, 0)  # turn off
             # Servo controls (left servo id=1, right servo id=2)
@@ -230,6 +255,14 @@ def manual_control():
             except Exception:
                 pass
             bot.Ctrl_WQ2812_ALL(0, 0)
+            # stop camera background thread if running
+            try:
+                if camera_thread is not None and camera_thread.is_alive():
+                    # request thread to stop and wait briefly
+                    camera_stop.set()
+                    camera_thread.join(timeout=1.0)
+            except Exception:
+                pass
         except Exception:
             pass
         termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
