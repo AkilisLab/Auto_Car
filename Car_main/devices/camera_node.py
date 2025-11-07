@@ -107,6 +107,23 @@ class Camera:
         ret, frame = self._cap.read()
         return ret, frame if ret else None
 
+    def read_rgb(self, wait: bool = True) -> Tuple[bool, Optional[any]]:
+        """Read a frame and return it converted to RGB order.
+
+        This wraps `read()` and performs a BGR->RGB conversion when a
+        valid frame is available. It respects the same `wait` semantics
+        as `read()` (i.e., will use the background reader if running).
+        """
+        ret, frame = self.read(wait=wait)
+        if not ret or frame is None:
+            return False, None
+        try:
+            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            return True, rgb
+        except Exception:
+            # conversion failed; return original frame as a fallback
+            return True, frame
+
     def start(self) -> bool:
         """Start a background reader thread that keeps the latest frame."""
         if self._running:

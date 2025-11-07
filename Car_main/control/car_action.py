@@ -84,6 +84,46 @@ class CarActions:
         finally:
             self.stop_motors()
 
+    def side_left_loop(self, stop_event) -> None:
+        """Strafe left (mecanum-like): motors set so vehicle moves left without yaw.
+
+        This assumes motor layout where setting opposing corners to
+        opposite directions produces lateral motion. Adjust if hardware
+        mapping differs.
+        """
+        try:
+            while not stop_event.is_set():
+                try:
+                    # Example mapping for left strafe:
+                    # front-left: backward, front-right: forward,
+                    # rear-left: forward, rear-right: backward
+                    self.bot.Ctrl_Car(0, 1, int(self.base_speed * 0.7))
+                    self.bot.Ctrl_Car(1, 0, int(self.base_speed * 0.7))
+                    self.bot.Ctrl_Car(2, 0, int(self.base_speed * 0.7))
+                    self.bot.Ctrl_Car(3, 1, int(self.base_speed * 0.7))
+                except Exception:
+                    pass
+                # blink LEDs while strafing
+                self.blink_all(1)
+        finally:
+            self.stop_motors()
+
+    def side_right_loop(self, stop_event) -> None:
+        """Strafe right (mecanum-like)."""
+        try:
+            while not stop_event.is_set():
+                try:
+                    # inverse of side_left_loop
+                    self.bot.Ctrl_Car(0, 0, int(self.base_speed * 0.7))
+                    self.bot.Ctrl_Car(1, 1, int(self.base_speed * 0.7))
+                    self.bot.Ctrl_Car(2, 1, int(self.base_speed * 0.7))
+                    self.bot.Ctrl_Car(3, 0, int(self.base_speed * 0.7))
+                except Exception:
+                    pass
+                self.blink_all(2)
+        finally:
+            self.stop_motors()
+
     def stop_loop(self, stop_event) -> None:
         try:
             while not stop_event.is_set():

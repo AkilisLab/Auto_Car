@@ -28,47 +28,92 @@ class OLEDDisplay:
         self.draw = ImageDraw.Draw(self.image)
         self.font = ImageFont.load_default()
 
+        # Number of text lines we can show (approx, based on 10px per line)
+        self.num_lines = max(1, self.height // 10)
+        # in-memory buffer for lines so callers can update individual lines
+        self._lines = [""] * self.num_lines
+
         self.clear()
-        self.show_text("OLED Ready")
+        self.set_line(0, "OLED Ready", refresh=True)
 
     # ------------------------------
     # General helpers
     # ------------------------------
     def clear(self):
         """Clear the display."""
-        self.display.clear()
-        # Some Adafruit drivers use .display() to show; YB uses image()/display()
+        # clear both the device and our buffer
+        self._lines = [""] * self.num_lines
         try:
+            self.display.clear()
+        except Exception:
+            pass
+        try:
+            # ensure display shows cleared buffer
+            self.display.image(Image.new("1", (self.width, self.height)))
             self.display.display()
         except Exception:
             pass
 
-    def show_text(self, text, line=0):
-        """Display text on a specific line."""
+    def refresh_display(self):
+        """Render current buffer to the device."""
+        # draw buffer into image
         self.draw.rectangle((0, 0, self.width, self.height), outline=0, fill=0)
-        y = line * 10
-        self.draw.text((0, y), text, font=self.font, fill=255)
-        try:
-            self.display.image(self.image)
-            self.display.display()
-        except Exception:
-            # some drivers have different methods
+        for i, text in enumerate(self._lines):
+            y = i * 10
             try:
-                self.display.image(self.image)
+                self.draw.text((0, y), text, font=self.font, fill=255)
             except Exception:
                 pass
-
-    def show_multiline(self, lines):
-        """Display multiple lines (list of strings)."""
-        self.draw.rectangle((0, 0, self.width, self.height), outline=0, fill=0)
-        for i, text in enumerate(lines):
-            y = i * 10
-            self.draw.text((0, y), text, font=self.font, fill=255)
         try:
             self.display.image(self.image)
             self.display.display()
         except Exception:
+            # some drivers may have different method names; ignore
             pass
+
+    def set_line(self, line: int, text: str, refresh: bool = True):
+        """Set a specific text line in the buffer and optionally refresh.
+
+        Lines are 0-indexed. If line >= num_lines it's clamped.
+        """
+        if line < 0:
+            return
+        idx = min(line, self.num_lines - 1)
+        self._lines[idx] = str(text)
+        if refresh:
+            self.refresh_display()
+
+    def set_lines(self, mapping: dict, refresh: bool = True):
+        """Set multiple lines at once. mapping: {line_index: text}.
+        Useful to update several fields together without flicker.
+        """
+        for k, v in mapping.items():
+            if isinstance(k, int) and k >= 0:
+                idx = min(k, self.num_lines - 1)
+                self._lines[idx] = str(v)
+        if refresh:
+            self.refresh_display()
+
+    def clear_line(self, line: int, refresh: bool = True):
+        if line < 0:
+            return
+        idx = min(line, self.num_lines - 1)
+        self._lines[idx] = ""
+        if refresh:
+            self.refresh_display()
+
+    def show_text(self, text, line=0):
+        """Backward-compatible: set a single line (overwrites that line only)."""
+        self.set_line(line, text, refresh=True)
+
+    def show_multiline(self, lines):
+        """Display multiple lines starting at line 0. This updates the
+        internal buffer so other independent updates can coexist."""
+        for i, text in enumerate(lines):
+            if i >= self.num_lines:
+                break
+            self._lines[i] = str(text)
+        self.refresh_display()
 
     # ------------------------------
     # System / Status Info
