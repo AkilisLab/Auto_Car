@@ -101,16 +101,12 @@ def reconstruct_path(came_from: Dict[Node, Node], current: Node) -> List[Node]:
 	return path
 
 
-def astar(grid: Grid, start: Node, goal: Node) -> List[Node]:
-	"""Run A* on the given grid from start to goal.
 
-	Returns a list of nodes (row, col) from start to goal inclusive.
-	If no path exists, returns an empty list.
+def astar_with_intersections(grid: Grid, start: Node, goal: Node) -> Tuple[List[Node], List[int]]:
+	"""Run A* and also return indices of intersections along the path.
 
-	Assumptions/contract:
-	- grid: 0 is walkable, 1 is obstacle
-	- start and goal are inside bounds
-	- uses 4-connectivity and Manhattan heuristic
+	An intersection is defined as a node with more than two walkable neighbors.
+	Returns (path, intersection_indices).
 	"""
 	rows = len(grid)
 	cols = len(grid[0])
@@ -132,7 +128,6 @@ def astar(grid: Grid, start: Node, goal: Node) -> List[Node]:
 	f_score: Dict[Node, int] = {start: manhattan(start, goal)}
 	came_from: Dict[Node, Node] = {}
 
-	# tie breaker counter to ensure deterministic behavior
 	counter = 0
 	heapq.heappush(open_heap, (f_score[start], counter, start))
 
@@ -142,7 +137,16 @@ def astar(grid: Grid, start: Node, goal: Node) -> List[Node]:
 		_, _, current = heapq.heappop(open_heap)
 
 		if current == goal:
-			return reconstruct_path(came_from, current)
+			path = reconstruct_path(came_from, current)
+			# Find intersections along the path
+			intersection_indices = []
+			for idx, node in enumerate(path):
+				nbrs = neighbors(grid, node)
+				has_vertical = any(nb[0] != node[0] for nb in nbrs)
+				has_horizontal = any(nb[1] != node[1] for nb in nbrs)
+				if has_vertical and has_horizontal:
+					intersection_indices.append(idx)
+			return path, intersection_indices
 
 		if current in closed:
 			continue
@@ -152,7 +156,7 @@ def astar(grid: Grid, start: Node, goal: Node) -> List[Node]:
 		for nb in neighbors(grid, current):
 			if nb in closed:
 				continue
-			tentative_g = current_g + 1  # uniform cost per move
+			tentative_g = current_g + 1
 
 			if tentative_g < g_score.get(nb, float('inf')):
 				came_from[nb] = current
@@ -163,7 +167,12 @@ def astar(grid: Grid, start: Node, goal: Node) -> List[Node]:
 				heapq.heappush(open_heap, (f, counter, nb))
 
 	# no path found
-	return []
+	return [], []
+
+def astar(grid: Grid, start: Node, goal: Node) -> List[Node]:
+	"""Run A* on the given grid from start to goal. Returns path only."""
+	path, _ = astar_with_intersections(grid, start, goal)
+	return path
 
 
 def _delta_to_heading(dr: int, dc: int) -> str:
@@ -218,6 +227,38 @@ def plan_with_headings(grid: Grid, start: Node, goal: Node) -> List[dict]:
 	"""
 	path = astar(grid, start, goal)
 	return waypoints_with_headings(path)
+
+def intersection_actions(waypoints: List[dict], intersection_indices: List[int]) -> List[str]:
+	"""Given waypoints and intersection indices, return action at each intersection ('left', 'right', 'forward').
+	Compares heading before and at the intersection."""
+	actions = []
+	heading_order = ['N', 'E', 'S', 'W']  # clockwise
+	def heading_to_idx(h):
+		try:
+			return heading_order.index(h)
+		except ValueError:
+			return -1
+	for idx in intersection_indices:
+		if idx == 0:
+			actions.append('forward')
+			continue
+		prev_h = waypoints[idx - 1]['heading']
+		curr_h = waypoints[idx]['heading']
+		prev_idx = heading_to_idx(prev_h)
+		curr_idx = heading_to_idx(curr_h)
+		if prev_idx == -1 or curr_idx == -1:
+			actions.append('forward')
+			continue
+		diff = (curr_idx - prev_idx) % 4
+		if diff == 0:
+			actions.append('forward')
+		elif diff == 1:
+			actions.append('right')
+		elif diff == 3:
+			actions.append('left')
+		else:
+			actions.append('forward')
+	return actions
 
 
 if __name__ == '__main__':
@@ -281,15 +322,24 @@ if __name__ == '__main__':
 	print(f"Grid size: {rows}x{cols}")
 	print(f"Start: {start}, Goal: {goal}")
 
-	path = astar(grid, start, goal)
+	path, intersection_indices = astar_with_intersections(grid, start, goal)
 	if path:
-		print("Path found (length {}):".format(len(path)))
+		print(f"Path found (length {len(path)}):")
 		print(path)
 		# Also show waypoints with headings
 		wps = waypoints_with_headings(path)
 		print("Waypoints with headings:")
 		for wp in wps:
 			print(wp)
+		# Log intersections and actions
+		if intersection_indices:
+			print(f"Intersections found at indices: {intersection_indices}")
+			print("Intersection coordinates and actions:")
+			actions = intersection_actions(wps, intersection_indices)
+			for idx, action in zip(intersection_indices, actions):
+				print(f"  idx={idx}, coord={path[idx]}, action={action}")
+		else:
+			print("No intersections found along the path.")
 	else:
 		print("No path found")
 
