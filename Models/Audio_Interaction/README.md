@@ -11,6 +11,7 @@ This folder contains the AI server used by the Auto Car stack to process text an
 ```
 cd /home/akilis/Documents/GitHub/Auto_Car/Models/Audio_Interaction
 python3 -m uvicorn ai_server:app --host 0.0.0.0 --port 8010 --reload
+uvicorn ai_server:app --host 0.0.0.0 --port 8010
 ```
 
 Quick test:
