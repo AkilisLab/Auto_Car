@@ -99,6 +99,7 @@ def main() -> None:
             print("Starting auto lane follower on camera (index 0)")
             # --- New: optional path planning step ---
             if read_grid and plan_with_headings:
+                from path_planning.Astar_planner import intersection_actions, astar_with_intersections, waypoints_with_headings
                 grid_path_default = os.path.join('path_planning', 'test_grid.txt')
                 grid_path = grid_path_default if os.path.exists(grid_path_default) else None
                 if grid_path is None:
@@ -163,7 +164,9 @@ def main() -> None:
                         start = parse_coord(user_start, default_start)
                         goal = parse_coord(user_goal, default_goal)
                         print(f"Planning path from {start} to {goal} ...")
-                        waypoints = plan_with_headings(grid, start, goal)
+                        path, intersection_indices = astar_with_intersections(grid, start, goal)
+                        waypoints = waypoints_with_headings(path)
+                        actions = intersection_actions(waypoints, intersection_indices)
                         if not waypoints:
                             print("No path found; proceeding without path guidance.")
                         else:
@@ -177,21 +180,21 @@ def main() -> None:
                             print("Waypoints (preview):")
                             for wp in preview:
                                 print(wp)
-                            # Extract simple turning indices where heading changes
-                            turning_points = []
-                            prev_h = None
-                            for idx, wp in enumerate(waypoints):
-                                h = wp['heading']
-                                if prev_h is not None and h != prev_h:
-                                    turning_points.append(idx)
-                                prev_h = h
-                            print(f"Turning point indices: {turning_points if turning_points else 'None'}")
+                            print(f"Intersection indices: {intersection_indices if intersection_indices else 'None'}")
+                            print(f"Intersection actions: {actions if actions else 'None'}")
                     except Exception as e:
                         print(f"Path planning error: {e}; continuing without path.")
             else:
                 print("Path planner not available (import failed); skipping path guidance.")
             # Construct LaneFollower with the video source and then run it.
-            lf = LaneFollower(video_source=0)
+            # Pass waypoints and turning_points to LaneFollower if available
+            lane_follower_args = {"video_source": 0}
+            # Pass path planner data if available
+            if 'waypoints' in locals() and waypoints and 'intersection_indices' in locals() and 'actions' in locals():
+                lane_follower_args["route"] = waypoints
+                lane_follower_args["intersection_indices"] = intersection_indices
+                lane_follower_args["intersection_actions"] = actions
+            lf = LaneFollower(**lane_follower_args)
             # Show debug so you can see the tracking visual; set to False if headless
             try:
                 lf.run(show_debug=True)

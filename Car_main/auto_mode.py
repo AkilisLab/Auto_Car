@@ -220,7 +220,7 @@ class CarController:
 class LaneFollower:
     """Coordinator: wires Perception, Detection and Control into a loop."""
 
-    def __init__(self, video_source=0, base_speed=80, steering_gain=0.9, speed_scale=0.6, speed_sensitivity: float = 0.8, min_forward: float = 0.3, view: str = 'center', calib_path: str = None):
+    def __init__(self, video_source=0, base_speed=80, steering_gain=0.9, speed_scale=0.6, speed_sensitivity: float = 0.8, min_forward: float = 0.3, view: str = 'center', calib_path: str = None, route=None, turning_points=None, intersection_indices=None, intersection_actions=None):
         self.perception = PerceptionInput(video_source)
         self.detector = LaneDetection()
         try:
@@ -240,12 +240,62 @@ class LaneFollower:
                 logging.exception('Failed to load calibration file: %s', calib_path)
 
         self.controller = CarController(base_speed=base_speed, steering_gain=steering_gain, speed_scale=speed_scale, speed_sensitivity=speed_sensitivity, min_forward_scale=min_forward)
+        # Store route and intersection logic
+        self.route = route if route is not None else []
+        self.intersection_indices = intersection_indices if intersection_indices is not None else []
+        self.intersection_actions = intersection_actions if intersection_actions is not None else []
+        self.current_intersection = 0  # index into intersection_indices/actions
+        self.last_ir_state = None
+        self.ir_triggered = False
 
     def run(self, show_debug: bool = False, show_steps: bool = False, save_steps: bool = False):
         self.perception.start()
         frame_idx = 0
         try:
             while True:
+                # --- IR sensor check for intersection ---
+                try:
+                    ir_data = self.controller.bot.read_data_array(0x0a, 1)
+                    ir_val = int(ir_data[0]) if ir_data and len(ir_data) > 0 else 0
+                except Exception:
+                    ir_val = 0
+                # Trigger only if all four IR sensors are active (all bits set)
+                at_intersection = (ir_val & 0x0F) == 0x0F
+                # Rising edge detection
+                if at_intersection and not self.ir_triggered:
+                    self.ir_triggered = True
+                    # Handle intersection event
+                    if self.current_intersection < len(self.intersection_indices):
+                        action = self.intersection_actions[self.current_intersection] if self.current_intersection < len(self.intersection_actions) else 'forward'
+                        # Map action to view
+                        if action == 'left':
+                            view = 'left'
+                        elif action == 'right':
+                            view = 'right'
+                        else:
+                            view = 'center'
+                        try:
+                            self.detector.set_view(view)
+                        except Exception:
+                            pass
+                        # Set camera servo angle (assuming servo id 1)
+                        angle = self.detector._view_rotations.get(view, 0.0)
+                        # Map angle (e.g., -45, 0, 45) to servo range (0-180)
+                        # Example: center=90, left=135, right=45
+                        servo_angle = 90
+                        if view == 'left':
+                            servo_angle = 135
+                        elif view == 'right':
+                            servo_angle = 45
+                        try:
+                            self.controller.bot.Ctrl_Servo(1, int(servo_angle))
+                        except Exception:
+                            pass
+                        logging.info(f"Intersection {self.current_intersection}: action={action}, view={view}, servo={servo_angle}")
+                        self.current_intersection += 1
+                elif not at_intersection:
+                    self.ir_triggered = False
+
                 ret, frame = self.perception.read(wait=True)
                 if not ret:
                     logging.info('End of stream or cannot read frame')
