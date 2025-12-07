@@ -54,5 +54,6 @@ def process_audio(file: UploadFile = File(...)):
             os.remove(temp_filename)
 
 if __name__ == "__main__":
-    # Run on port 8000
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    host = os.getenv("AI_SERVER_HOST", "0.0.0.0")
+    port = int(os.getenv("AI_SERVER_PORT", "8010"))
+    uvicorn.run(app, host=host, port=port)
