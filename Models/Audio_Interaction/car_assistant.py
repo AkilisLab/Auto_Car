@@ -15,7 +15,6 @@ import whisper
 import re
 from langchain.llms import Ollama
 from langchain.prompts import PromptTemplate
-from spotify import play_music  # Import the player function
 
 # ------------------ Mock Car Knowledge ------------------
 # In a real system, this could be loaded from a PDF manual or dynamic vehicle status API.
@@ -40,12 +39,40 @@ CAR_ASSISTANT_TEMPLATE = """You are an intelligent in-car voice assistant for th
 Use the provided 'Car Context' (System Status and Manual) to answer the user's voice command or question.
 
 Guidelines:
-- If the user asks to PLAY MUSIC, output the command in this format: [[PLAY: Song Name]]
-- If the user asks for an action (e.g., "go forward"), check if it's possible based on context, then confirm the action.
-- If the user asks a question, answer concisely using the context.
-- If the user requests emergency breaking, confirm the action.
-- If the information is missing, say "I don't have that information."
-- Keep answers short (2 to 3 sentences) suitable for text-to-speech.
+- Keep answers short (1 sentence if possible) suitable for text-to-speech.
+- Do NOT include greetings, quotes, or multi-paragraph explanations.
+- Do NOT ask follow-up questions for navigation. If the user specifies a destination name (e.g., "home"), proceed.
+- Do NOT emit music intents unless the user explicitly asked to play music.
+- For navigation requests ("navigate", "go to", "drive to", "take me to"), ALWAYS use auto navigation intents (auto_route_start/auto_route_stop) — never timed_drive.
+
+IMPORTANT OUTPUT FORMAT (for downstream control parsing):
+ALWAYS end your response with exactly ONE machine-readable intent line in one of these forms:
+    - [[INTENT: play_music; query="<song or artist query>"]]
+    - [[INTENT: timed_drive; direction=forward|backward|left|right; duration_s=<number>]]
+    - [[INTENT: auto_route_start; destination="<place>"; route_type=fastest|eco|safe; max_speed=<number>]]
+    - [[INTENT: auto_route_stop; reason="user_request"]]
+    - [[INTENT: stop]]
+    - [[INTENT: emergency_stop]]
+    - [[INTENT: none]]
+Rules for the intent line:
+- It must be the final line of your output.
+- Use only one intent line.
+- Use duration_s in seconds when applicable.
+- If a parameter is not specified by the user, choose a reasonable default (route_type=fastest, max_speed=35).
+- If the destination is a name (not coordinates), put the name into destination exactly (e.g., destination="home").
+
+Examples (follow these formats exactly):
+User: Navigate home
+Assistant: Starting navigation.
+[[INTENT: auto_route_start; destination="home"; route_type=fastest; max_speed=35]]
+
+User: Stop navigation
+Assistant: Stopping navigation.
+[[INTENT: auto_route_stop; reason="user_request"]]
+
+User: Go forward for 3 seconds
+Assistant: Moving forward.
+[[INTENT: timed_drive; direction=forward; duration_s=3]]
 
 Car Context:
 {context}
@@ -82,45 +109,40 @@ def check_wake_word(text: str, wake_word: str = "autocar") -> bool:
 
 # ------------------ Prompt Stuffing Logic ------------------
 def process_command(command_text: str, context_text: str, llm_model: str = "llama2") -> str:
-    """Inject context and command into the LLM prompt."""
-    
-    # 1. Wake Word Check
+    """Inject context and command into the LLM prompt.
+
+    Note: This function does NOT execute actions (e.g., Spotify playback).
+    If the model decides music should be played, it should emit a tag like
+    `[[PLAY: Song Name]]` which downstream components (client/backend) can
+    interpret and execute.
+    """
+
+    # 1) Wake word check (do not change: AutoDrive)
     if not check_wake_word(command_text, "autodrive"):
         print("Wake word 'AutoDrive' not detected. Ignoring command.")
         return "(Ignored: Command did not contain 'AutoDrive')"
 
-    # Remove wake word and common prefixes for cleaner processing
-    # e.g. "Hey AutoDrive play music" -> "play music"
-    # Regex explanation:
-    # (hey|hi|okay|ok)? : Optional prefix
-    # \s* : Optional whitespace
-    # autodrive : The wake word
-    # \W* : Optional non-word characters (punctuation)
-    clean_command = re.sub(r'(hey|hi|okay|ok)?\s*autodrive\W*', '', command_text, flags=re.IGNORECASE).strip()
-    
+    # 2) Strip wake word + common prefixes
+    clean_command = re.sub(
+        r"(hey|hi|okay|ok)?\s*autodrive\W*",
+        "",
+        command_text or "",
+        flags=re.IGNORECASE,
+    ).strip()
+
     if not clean_command:
         return "I'm listening. How can I help?"
 
     prompt = PromptTemplate.from_template(CAR_ASSISTANT_TEMPLATE).format(
         context=context_text,
-        command=clean_command
+        command=clean_command,
     )
-    
+
     print(f"Querying LLM ({llm_model})...")
     llm = Ollama(model=llm_model, temperature=0)
     response = llm(prompt)
-    
-    # Check for Function Calling (Music)
-    match = re.search(r"\[\[PLAY: (.*?)\]\]", response)
-    if match:
-        song_query = match.group(1)
-        print(f"Detected Music Intent: '{song_query}'")
-        try:
-            music_status = play_music(song_query)
-            return f"{response}\n(System: {music_status})"
-        except Exception as e:
-            return f"{response}\n(System Error: Could not play music. {e})"
 
+    # Do not execute any side-effects here; return the model output verbatim.
     return response
 
 
