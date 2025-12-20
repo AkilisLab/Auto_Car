@@ -21,7 +21,7 @@ An auto car project, @NTUST.
 - `Pillow` (imported as `PIL`)
 - `Adafruit-SSD1306`
 - `smbus` (or `smbus2` on non-Raspberry Pi hosts)
-- `spotipy` (used when Spotify integration is enabled)
+- `spotipy` (required by spotify.py helper when Spotify integration is enabled)
 
 ### Notes
 - `pydub` expects `ffmpeg` to be installed on the host OS for audio playback.

@@ -19,7 +19,7 @@ import cv2
 
 def main():
     p = argparse.ArgumentParser(description="Open image and print click coords")
-    p.add_argument('image', nargs='?', default='snapshots/snap_20251109_121536.jpg',
+    p.add_argument('image', nargs='?', default='snapshots/snap_20251109_120525.jpg',
                    help='Path to image (default: snapshots/snap_20251025_230641.jpg)')
     args = p.parse_args()
 
