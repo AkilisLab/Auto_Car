@@ -10,6 +10,7 @@ import numpy as np
 
 from devices.camera_node import Camera
 from perception.lane import Lane
+from perception.aruco_detector import ArUcoDetector
 
 try:
 	from devices.raspbot import Raspbot
@@ -106,6 +107,9 @@ class AutoModeController:
 		self._next_action_index = 0
 		self._pending_action: Optional[str] = None
 		self._pending_intersection_idx: Optional[int] = None
+		self._aruco = ArUcoDetector(show_debug=show_debug)
+		self._last_marker_ids: set[int] = set()
+		self._marker_confidence_threshold = 0.5
 
 	def run(self) -> None:
 		if not self.camera.open():
@@ -132,6 +136,8 @@ class AutoModeController:
 
 				measurement = self._measure_lane(frame)
 				self._apply_control(measurement)
+
+				self._log_marker_detections(frame)
 
 				if self.show_debug:
 					self._show_debug_frame(measurement)
@@ -227,6 +233,33 @@ class AutoModeController:
 			(track >> 1) & 0x01,
 			track & 0x01,
 		)
+
+	def _log_marker_detections(self, frame: Optional[np.ndarray]) -> None:
+		if frame is None:
+			return
+		markers = self._aruco.detect(frame)
+		if not markers:
+			if self._last_marker_ids:
+				self._last_marker_ids.clear()
+				LOG.debug("ArUco markers no longer visible")
+			return
+		current_ids = {marker.marker_id for marker in markers}
+		if current_ids != self._last_marker_ids:
+			self._last_marker_ids = current_ids
+			for marker in markers:
+				if marker.confidence >= self._marker_confidence_threshold:
+					LOG.info(
+						"Detected ArUco marker id=%s center=%s confidence=%.3f",
+						marker.marker_id,
+						marker.center,
+						marker.confidence,
+					)
+				else:
+					LOG.debug(
+						"Ignoring low-confidence marker id=%s confidence=%.3f",
+						marker.marker_id,
+						marker.confidence,
+					)
 
 	def _next_planned_action(self) -> Optional[str]:
 		if self.planned_route is None:
