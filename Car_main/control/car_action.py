@@ -58,10 +58,10 @@ class CarActions:
         try:
             while not stop_event.is_set():
                 try:
-                    self.bot.Ctrl_Car(0, 1, int(self.base_speed * 0.3))
-                    self.bot.Ctrl_Car(1, 1, int(self.base_speed * 0.3))
-                    self.bot.Ctrl_Car(2, 0, int(self.base_speed * 0.3))
-                    self.bot.Ctrl_Car(3, 0, int(self.base_speed * 0.3))
+                    self.bot.Ctrl_Car(0, 1, int(self.base_speed * 0.6))
+                    self.bot.Ctrl_Car(1, 1, int(self.base_speed * 0.6))
+                    self.bot.Ctrl_Car(2, 0, int(self.base_speed * 0.6))
+                    self.bot.Ctrl_Car(3, 0, int(self.base_speed * 0.6))
                 except Exception:
                     pass
                 # blink LEDs while turning
@@ -73,10 +73,10 @@ class CarActions:
         try:
             while not stop_event.is_set():
                 try:
-                    self.bot.Ctrl_Car(0, 0, int(self.base_speed * 0.3))
-                    self.bot.Ctrl_Car(1, 0, int(self.base_speed * 0.3))
-                    self.bot.Ctrl_Car(2, 1, int(self.base_speed * 0.3))
-                    self.bot.Ctrl_Car(3, 1, int(self.base_speed * 0.3))
+                    self.bot.Ctrl_Car(0, 0, int(self.base_speed * 0.6))
+                    self.bot.Ctrl_Car(1, 0, int(self.base_speed * 0.6))
+                    self.bot.Ctrl_Car(2, 1, int(self.base_speed * 0.6))
+                    self.bot.Ctrl_Car(3, 1, int(self.base_speed * 0.6))
                 except Exception:
                     pass
                 # blink LEDs while turning

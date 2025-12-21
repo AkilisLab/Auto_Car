@@ -100,6 +100,21 @@ class Lane:
     self.right_curvem = None
     self.center_offset = None
  
+  def _clear_fit_state(self):
+    """Reset cached fit data when lane pixels are unavailable."""
+    self.left_fit = None
+    self.right_fit = None
+    self.left_lane_inds = None
+    self.right_lane_inds = None
+    self.ploty = None
+    self.left_fitx = None
+    self.right_fitx = None
+    self.leftx = None
+    self.rightx = None
+    self.lefty = None
+    self.righty = None
+    self.center_fitx = None
+
   def _expand_roi(self, points, scale):
     """
     Expand the ROI polygon around its centroid by the given scale factor.
@@ -238,6 +253,10 @@ class Lane:
     :param: right_fit Polynomial function of the right lane line
     :param: plot To display an image or not
     """
+    if left_fit is None or right_fit is None:
+      self._clear_fit_state()
+      return
+
     # margin is a sliding window parameter
     margin = self.margin
  
@@ -265,6 +284,10 @@ class Lane:
     rightx = nonzerox[right_lane_inds]
     righty = nonzeroy[right_lane_inds]  
  
+    if leftx.size < 3 or lefty.size < 3 or rightx.size < 3 or righty.size < 3:
+      self._clear_fit_state()
+      return
+
     self.leftx = leftx
     self.rightx = rightx
     self.lefty = lefty
@@ -409,11 +432,22 @@ class Lane:
     rightx = nonzerox[right_lane_inds] 
     righty = nonzeroy[right_lane_inds]
  
+    if leftx.size < 3 or lefty.size < 3 or rightx.size < 3 or righty.size < 3:
+      self._clear_fit_state()
+      return None, None
+
+    self.leftx = leftx
+    self.lefty = lefty
+    self.rightx = rightx
+    self.righty = righty
+
     # Fit a second order polynomial curve to the pixel coordinates for
     # the left and right lane lines
     left_fit = np.polyfit(lefty, leftx, 2)
     right_fit = np.polyfit(righty, rightx, 2) 
          
+    self.left_lane_inds = left_lane_inds
+    self.right_lane_inds = right_lane_inds
     self.left_fit = left_fit
     self.right_fit = right_fit
  

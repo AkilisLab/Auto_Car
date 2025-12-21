@@ -3,7 +3,7 @@
 import logging
 import time
 from dataclasses import dataclass
-from typing import Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 import cv2
 import numpy as np
@@ -69,6 +69,9 @@ class DifferentialDrive:
 		except Exception:
 			LOG.exception("Ctrl_Car failed for motor %s", motor_id)
 
+	def get_controller(self) -> Optional[Any]:
+		return self._bot
+
 
 class AutoModeController:
 	"""Coordinate camera, lane detection, and drive control."""
@@ -78,12 +81,12 @@ class AutoModeController:
 		camera_index: int = 0,
 		resolution: Tuple[int, int] = (640, 480),
 		fps: Optional[int] = None,
-		base_speed: int = 50,
+		base_speed: int = 30,
 		steering_gain: float = 0.45,
 		control_rate_hz: float = 10.0,
 		show_debug: bool = False,
 		fallback_speed_ratio: float = 0.4,
-		max_speed: int = 80,
+		max_speed: int = 60,
 	) -> None:
 		width, height = resolution
 		camera_args = dict(index=camera_index, width=width, height=height)
@@ -97,6 +100,12 @@ class AutoModeController:
 		self.show_debug = show_debug
 		self.fallback_speed_ratio = max(0.0, min(1.0, fallback_speed_ratio))
 		self.max_speed = max(0, max_speed)
+		self.planned_route: Optional[Dict[str, Any]] = None
+		self._raspbot = self.drive.get_controller()
+		self.last_line_state: Optional[Tuple[int, int, int, int]] = None
+		self._next_action_index = 0
+		self._pending_action: Optional[str] = None
+		self._pending_intersection_idx: Optional[int] = None
 
 	def run(self) -> None:
 		if not self.camera.open():
@@ -110,6 +119,16 @@ class AutoModeController:
 				if not ret or frame is None:
 					time.sleep(0.01)
 					continue
+
+				line_state = self._read_line_sensors()
+				if line_state is not None and line_state != self.last_line_state:
+					self.last_line_state = line_state
+					LOG.debug("IR line sensors: %s", line_state)
+					if line_state == (1, 1, 1, 1):
+						LOG.info("IR sensors detected intersection (all sensors white)")
+						pending = self._next_planned_action()
+						if pending:
+							LOG.info("Upcoming planner action: %s", pending)
 
 				measurement = self._measure_lane(frame)
 				self._apply_control(measurement)
@@ -134,7 +153,13 @@ class AutoModeController:
 			lane_obj.perspective_transform(plot=False)
 			lane_obj.calculate_histogram(plot=False)
 			left_fit, right_fit = lane_obj.get_lane_line_indices_sliding_windows(plot=False)
+			if left_fit is None or right_fit is None:
+				LOG.debug("Insufficient lane pixels; skipping frame")
+				return LaneMeasurement(offset_cm=None, offset_pixels=None, overlay=None, raw_frame=frame)
 			lane_obj.get_lane_line_previous_window(left_fit, right_fit, plot=False)
+			if lane_obj.left_fit is None or lane_obj.right_fit is None:
+				LOG.debug("Refined lane fit failed; skipping frame")
+				return LaneMeasurement(offset_cm=None, offset_pixels=None, overlay=None, raw_frame=frame)
 			lane_obj.calculate_curvature()
 			offset_cm = lane_obj.calculate_car_position()
 
@@ -180,3 +205,46 @@ class AutoModeController:
 		cv2.imshow("Auto Mode - Lane", view)
 		if cv2.waitKey(1) & 0xFF == ord("q"):
 			raise KeyboardInterrupt()
+
+	def _read_line_sensors(self) -> Optional[Tuple[int, int, int, int]]:
+		if self._raspbot is None:
+			return None
+		try:
+			data = self._raspbot.read_data_array(0x0A, 1)
+		except Exception:
+			LOG.exception("Failed to read IR line sensors")
+			return None
+		if not data:
+			return None
+		try:
+			track = int(data[0])
+		except (TypeError, ValueError):
+			LOG.warning("Unexpected IR sensor payload: %s", data)
+			return None
+		return (
+			(track >> 3) & 0x01,
+			(track >> 2) & 0x01,
+			(track >> 1) & 0x01,
+			track & 0x01,
+		)
+
+	def _next_planned_action(self) -> Optional[str]:
+		if self.planned_route is None:
+			return None
+		actions = self.planned_route.get("actions")
+		indices = self.planned_route.get("intersections")
+		if not actions or not indices:
+			return None
+		if self._next_action_index >= len(actions):
+			LOG.info("Planner actions exhausted")
+			return None
+		action = actions[self._next_action_index]
+		self._pending_action = action
+		self._pending_intersection_idx = indices[self._next_action_index]
+		self._next_action_index += 1
+		LOG.debug(
+			"Queued planner action %s at intersection index %s",
+			action,
+			self._pending_intersection_idx,
+		)
+		return action
