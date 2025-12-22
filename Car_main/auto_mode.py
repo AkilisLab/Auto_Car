@@ -3,7 +3,7 @@
 import logging
 import time
 from dataclasses import dataclass
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple, Set
 
 import cv2
 import numpy as np
@@ -11,6 +11,7 @@ import numpy as np
 from devices.camera_node import Camera
 from perception.lane import Lane
 from perception.aruco_detector import ArUcoDetector
+from control import planned_maneuvers
 
 try:
 	from devices.raspbot import Raspbot
@@ -77,6 +78,22 @@ class DifferentialDrive:
 class AutoModeController:
 	"""Coordinate camera, lane detection, and drive control."""
 
+	ARUCO_ACTION_HINTS: Dict[int, str] = {
+		# Map marker IDs to semantic hints for intersection or lane behavior
+		0: "start",
+		1: "goal",
+		2: "left_type_a",
+		3: "left_type_b",
+		4: "left_type_c",
+		5: "right",
+		6: "lane_change_left",
+		7: "lane_change_right",
+		8: "forward",
+		9: "end_of_turn",
+		10: "intersection",
+		11: "stop",
+	}
+
 	def __init__(
 		self,
 		camera_index: int = 0,
@@ -101,7 +118,7 @@ class AutoModeController:
 		self.show_debug = show_debug
 		self.fallback_speed_ratio = max(0.0, min(1.0, fallback_speed_ratio))
 		self.max_speed = max(0, max_speed)
-		self.planned_route: Optional[Dict[str, Any]] = None
+		self.planned_route: Optional[Dict[str, Any]] = None  # Injected from CLI planner
 		self._raspbot = self.drive.get_controller()
 		self.last_line_state: Optional[Tuple[int, int, int, int]] = None
 		self._next_action_index = 0
@@ -110,6 +127,9 @@ class AutoModeController:
 		self._aruco = ArUcoDetector(show_debug=show_debug)
 		self._last_marker_ids: set[int] = set()
 		self._marker_confidence_threshold = 0.5
+		self._is_at_intersection = False
+		self._intersection_action_pending = False
+		self._pending_marker_hint: Optional[str] = None
 
 	def run(self) -> None:
 		if not self.camera.open():
@@ -118,6 +138,7 @@ class AutoModeController:
 		LOG.info("Auto mode started")
 
 		try:
+			# Core control loop: read sensors, maintain lane, react to intersections and markers
 			while True:
 				ret, frame = self.camera.read(wait=True)
 				if not ret or frame is None:
@@ -125,19 +146,31 @@ class AutoModeController:
 					continue
 
 				line_state = self._read_line_sensors()
+				is_all_white = bool(line_state == (1, 1, 1, 1)) if line_state is not None else False
+				self._is_at_intersection = is_all_white
 				if line_state is not None and line_state != self.last_line_state:
 					self.last_line_state = line_state
 					LOG.debug("IR line sensors: %s", line_state)
-					if line_state == (1, 1, 1, 1):
+					if is_all_white:
+						# All sensors see white: intersection detected, so pull the next planner action
 						LOG.info("IR sensors detected intersection (all sensors white)")
 						pending = self._next_planned_action()
 						if pending:
 							LOG.info("Upcoming planner action: %s", pending)
+						# Immediately stop the vehicle at the white block (intersection)
+						self.drive.stop()
+						LOG.info("Stopped at intersection for 5.0s to await marker/hint")
+						time.sleep(5.0)
+						self._intersection_action_pending = True
+					else:
+						self._intersection_action_pending = False
 
 				measurement = self._measure_lane(frame)
 				self._apply_control(measurement)
 
 				self._log_marker_detections(frame)
+				if self._intersection_action_pending:
+					self._handle_intersection()
 
 				if self.show_debug:
 					self._show_debug_frame(measurement)
@@ -187,8 +220,49 @@ class AutoModeController:
 			if slow_speed == 0:
 				self.drive.stop()
 			else:
-				LOG.debug("No lane measurement available; reducing speed to %.1f", slow_speed)
-				self.drive.set_speeds(slow_speed, slow_speed)
+				# IR-based fallback: nudge left/right if outer sensors see white
+				left_nudge = right_nudge = slow_speed
+				line_state = self._read_line_sensors()
+				CORRECTION = 30  # Larger correction value
+				CORRECTION_TIME = 0.25  # Correction duration in seconds (increase for longer nudge)
+				COMPENSATE_RATIO = 0.7  # Compensation duration as a fraction of correction
+				if line_state is not None:
+					leftmost, _, _, rightmost = line_state
+					if rightmost:
+						# Nudge left
+						left_nudge = max(0, slow_speed - CORRECTION)
+						right_nudge = min(self.max_speed, slow_speed + CORRECTION)
+						LOG.debug("IR fallback: rightmost sensor white, nudging left")
+						self.drive.set_speeds(left_nudge, right_nudge)
+						time.sleep(CORRECTION_TIME)
+						self.drive.stop()
+						time.sleep(0.05)
+						# Compensate by nudging right
+						comp_left = min(self.max_speed, slow_speed + CORRECTION)
+						comp_right = max(0, slow_speed - CORRECTION)
+						self.drive.set_speeds(comp_left, comp_right)
+						time.sleep(CORRECTION_TIME * COMPENSATE_RATIO)
+						self.drive.stop()
+					elif leftmost:
+						# Nudge right
+						left_nudge = min(self.max_speed, slow_speed + CORRECTION)
+						right_nudge = max(0, slow_speed - CORRECTION)
+						LOG.debug("IR fallback: leftmost sensor white, nudging right")
+						self.drive.set_speeds(left_nudge, right_nudge)
+						time.sleep(CORRECTION_TIME)
+						self.drive.stop()
+						time.sleep(0.05)
+						# Compensate by nudging left
+						comp_left = max(0, slow_speed - CORRECTION)
+						comp_right = min(self.max_speed, slow_speed + CORRECTION)
+						self.drive.set_speeds(comp_left, comp_right)
+						time.sleep(CORRECTION_TIME * COMPENSATE_RATIO)
+						self.drive.stop()
+					else:
+						self.drive.set_speeds(left_nudge, right_nudge)
+				else:
+					self.drive.set_speeds(left_nudge, right_nudge)
+				LOG.debug("No lane measurement; fallback speeds: L=%.1f R=%.1f", left_nudge, right_nudge)
 			return
 
 		turn = measurement.offset_pixels * self.steering_gain
@@ -243,23 +317,43 @@ class AutoModeController:
 				self._last_marker_ids.clear()
 				LOG.debug("ArUco markers no longer visible")
 			return
-		current_ids = {marker.marker_id for marker in markers}
+		high_conf_markers = [m for m in markers if m.confidence >= self._marker_confidence_threshold]
+		for marker in markers:
+			if marker.confidence < self._marker_confidence_threshold:
+				LOG.debug(
+					"Ignoring low-confidence marker id=%s confidence=%.3f",
+					marker.marker_id,
+					marker.confidence,
+				)
+		if not high_conf_markers:
+			if self._last_marker_ids:
+				self._last_marker_ids.clear()
+				LOG.debug("All high-confidence markers lost")
+			return
+		current_ids = {marker.marker_id for marker in high_conf_markers}
 		if current_ids != self._last_marker_ids:
 			self._last_marker_ids = current_ids
-			for marker in markers:
-				if marker.confidence >= self._marker_confidence_threshold:
-					LOG.info(
-						"Detected ArUco marker id=%s center=%s confidence=%.3f",
-						marker.marker_id,
-						marker.center,
-						marker.confidence,
-					)
-				else:
-					LOG.debug(
-						"Ignoring low-confidence marker id=%s confidence=%.3f",
-						marker.marker_id,
-						marker.confidence,
-					)
+			for marker in high_conf_markers:
+				context = " [away from intersection]" if not self._is_at_intersection else ""
+				LOG.info(
+					"Detected ArUco marker id=%s center=%s confidence=%.3f%s",
+					marker.marker_id,
+					marker.center,
+					marker.confidence,
+					context,
+				)
+				hint = self.ARUCO_ACTION_HINTS.get(marker.marker_id)
+				if hint:
+					if self._is_at_intersection:
+						LOG.debug("Marker hint %s recorded for intersection handling", hint)
+						self._pending_marker_hint = hint
+					else:
+						LOG.info(
+							"Marker id=%s confirmed outside intersection; hint=%s",
+							marker.marker_id,
+							hint,
+						)
+						self._handle_marker_hint_outside_intersection(hint)
 
 	def _next_planned_action(self) -> Optional[str]:
 		if self.planned_route is None:
@@ -281,3 +375,135 @@ class AutoModeController:
 			self._pending_intersection_idx,
 		)
 		return action
+
+	def _handle_intersection(self) -> None:
+		if not self._intersection_action_pending:
+			return
+		if self._pending_action is None:
+			LOG.info("Intersection detected but planner queue provided no action")
+			self._clear_pending_intersection()
+			return
+		marker_hint = self._interpret_marker_hint(self._last_marker_ids)
+		specific_hint = self._pending_marker_hint or marker_hint
+		if specific_hint:
+			LOG.info("ArUco marker hint at intersection: %s", marker_hint)
+			if specific_hint.startswith("left_type_"):
+				if self._pending_action == "left":
+					LOG.info("Marker specifies %s, aligning with planner left turn", specific_hint)
+				else:
+					LOG.warning(
+						"Marker requests %s but planner expects %s",
+						specific_hint,
+						self._pending_action,
+					)
+			elif specific_hint in {"left", "right", "forward"}:
+				if marker_hint == self._pending_action:
+					LOG.info("Marker hint matches planner action '%s'", self._pending_action)
+				else:
+					LOG.warning(
+						"Marker hint %s differs from planner action %s",
+						specific_hint,
+						self._pending_action,
+					)
+			elif specific_hint in {"lane_change_left", "lane_change_right"}:
+				LOG.info("Marker requests %s around the intersection", specific_hint.replace("_", " "))
+			elif specific_hint == "stop":
+				LOG.info("Marker indicates stop; planner action remains %s", self._pending_action)
+			else:
+				LOG.debug("Marker hint %s recorded for telemetry", specific_hint)
+		else:
+			LOG.info("No ArUco marker hint available at this intersection")
+		LOG.info("Executing planner action '%s' (placeholder)", self._pending_action)
+		if self._pending_action == "left":
+			variant = specific_hint if specific_hint and specific_hint.startswith("left_type_") else None
+			if variant:
+				# execute the detected left-turn variant
+				if self._raspbot is not None:
+					planned_maneuvers.run_action(variant, self._raspbot)
+				else:
+					LOG.warning("No Raspbot controller available to run %s", variant)
+			else:
+				# execute a default left-turn variant when planner requests a generic left
+				default_left = "left_type_b"
+				if self._raspbot is not None:
+					planned_maneuvers.run_action(default_left, self._raspbot)
+				else:
+					LOG.warning("No Raspbot controller available to run %s", default_left)
+		elif self._pending_action == "right":
+			variant = specific_hint if specific_hint == "right" else None
+			if variant:
+				if self._raspbot is not None:
+					planned_maneuvers.run_action("right", self._raspbot)
+				else:
+					LOG.warning("No Raspbot controller available to run right turn")
+			else:
+				if self._raspbot is not None:
+					planned_maneuvers.run_action("right", self._raspbot)
+				else:
+					LOG.warning("No Raspbot controller available to run right turn")
+		elif self._pending_action == "forward":
+			if self._raspbot is not None:
+				planned_maneuvers.run_action("forward", self._raspbot)
+			else:
+				LOG.warning("No Raspbot controller available to run forward action")
+		else:
+			LOG.warning("Unknown planner action '%s'", self._pending_action)
+ 
+		self._clear_pending_intersection()
+
+	def _handle_marker_hint_outside_intersection(self, hint: str) -> None:
+		if hint == "lane_change_left":
+			if self._raspbot is not None:
+				planned_maneuvers.run_action("lane_change_left", self._raspbot)
+			else:
+				LOG.warning("No Raspbot controller available to run lane_change_left")
+		elif hint == "lane_change_right":
+			if self._raspbot is not None:
+				planned_maneuvers.run_action("lane_change_right", self._raspbot)
+			else:
+				LOG.warning("No Raspbot controller available to run lane_change_right")
+		elif hint == "stop":
+			# immediate controlled stop
+			self.drive.stop()
+			LOG.info("Performed immediate stop per marker request")
+		elif hint in {"start", "goal", "end_of_turn", "intersection"}:
+			LOG.debug("Context marker %s noted; no direct action required now", hint)
+		elif hint.startswith("left_type_"):
+			# TODO: prime the confirmed left-turn variant before reaching intersection
+			LOG.debug("TODO: pre-stage parameters for %s", hint)
+		elif hint == "right":
+			# TODO: prime right-turn routine outside intersection if needed
+			LOG.debug("TODO: pre-stage parameters for right turn")
+		else:
+			LOG.debug("Unhandled marker hint %s", hint)
+	
+	def _interpret_marker_hint(self, marker_ids: Set[int]) -> Optional[str]:
+		if not marker_ids:
+			return None
+		hints = []
+		for marker_id in marker_ids:
+			hint = self.ARUCO_ACTION_HINTS.get(marker_id)
+			if hint:
+				hints.append(hint)
+		if not hints:
+			return None
+		for candidate in (
+			"left_type_a",
+			"left_type_b",
+			"left_type_c",
+			"left",
+			"right",
+			"forward",
+			"lane_change_left",
+			"lane_change_right",
+			"stop",
+		):
+			if candidate in hints:
+				return candidate
+		return hints[0]
+
+	def _clear_pending_intersection(self) -> None:
+		self._pending_action = None
+		self._pending_intersection_idx = None
+		self._intersection_action_pending = False
+		self._pending_marker_hint = None

@@ -16,7 +16,7 @@ import matplotlib.pyplot as plt # Used for plotting and error checking
  
 filename = 'original_lane_detection_5.jpg'
 CENTRAL_MASK_WIDTH = 0.3  # fraction of width to suppress around image center
-ROI_CROP_SCALE = 1.08  # enlarge ROI slightly before cropping
+ROI_CROP_SCALE = 1.5  # enlarge ROI slightly before cropping
  
 class Lane:
   """
@@ -226,19 +226,24 @@ class Lane:
       image_copy = self.orig_frame.copy()
     else:
       image_copy = frame
- 
-    cv2.putText(image_copy,'Curve Radius: '+str((
-      self.left_curvem+self.right_curvem)/2)[:7]+' m', (int((
-      5/600)*self.width), int((
-      20/338)*self.height)), cv2.FONT_HERSHEY_SIMPLEX, (float((
-      0.5/600)*self.width)),(
-      255,255,255),2,cv2.LINE_AA)
-    cv2.putText(image_copy,'Center Offset: '+str(
-      self.center_offset)[:7]+' cm', (int((
-      5/600)*self.width), int((
-      40/338)*self.height)), cv2.FONT_HERSHEY_SIMPLEX, (float((
-      0.5/600)*self.width)),(
-      255,255,255),2,cv2.LINE_AA)
+
+    # Only draw curvature if values have been computed
+    try:
+      if (self.left_curvem is not None) and (self.right_curvem is not None):
+        curve_text = f"Curve Radius: {((self.left_curvem + self.right_curvem) / 2):.1f} m"
+        cv2.putText(image_copy, curve_text, (int((5/600)*self.width), int((20/338)*self.height)),
+                    cv2.FONT_HERSHEY_SIMPLEX, float((0.5/600)*self.width), (255,255,255), 2, cv2.LINE_AA)
+    except Exception:
+      # Defensive: if something unexpected, skip drawing curvature
+      pass
+
+    try:
+      if self.center_offset is not None:
+        offset_text = f"Center Offset: {self.center_offset:.1f} cm"
+        cv2.putText(image_copy, offset_text, (int((5/600)*self.width), int((40/338)*self.height)),
+                    cv2.FONT_HERSHEY_SIMPLEX, float((0.5/600)*self.width), (255,255,255), 2, cv2.LINE_AA)
+    except Exception:
+      pass
              
     if plot==True:       
       cv2.imshow("Image with Curvature and Offset", image_copy)
@@ -382,7 +387,13 @@ class Lane:
          
     # Current positions for pixel indices for each window,
     # which we will continue to update
-    leftx_base, rightx_base = self.histogram_peak()
+    leftx_base, rightx_base, peaks_valid = self.histogram_peak()
+    # If peaks are ambiguous (e.g. one visible lane or intersection), bail out early
+    if not peaks_valid:
+      self.left_fit = None
+      self.right_fit = None
+      return None, None
+
     leftx_current = leftx_base
     rightx_current = rightx_base
  
@@ -567,11 +578,32 @@ class Lane:
     right_region = self.histogram[min(width, midpoint + guard):]
 
     leftx_base = int(np.argmax(left_region)) if left_region.size else 0
+    left_val = int(np.max(left_region)) if left_region.size else 0
     right_offset = int(np.argmax(right_region)) if right_region.size else 0
     rightx_base = right_offset + min(width, midpoint + guard)
- 
-    # (x coordinate of left peak, x coordinate of right peak)
-    return leftx_base, rightx_base
+    right_val = int(np.max(right_region)) if right_region.size else 0
+
+    # Basic validation: peaks should be sufficiently separated and reasonably strong.
+    separation = rightx_base - leftx_base
+    min_separation = int(width * 0.25)  # require at least ~25% of image width between peaks
+    # avoid division by zero and measure relative strength
+    max_val = max(1, left_val, right_val)
+    strength_ratio = min(left_val, right_val) / max_val
+
+    peaks_valid = True
+    if separation < min_separation:
+      peaks_valid = False
+    if max(left_val, right_val) < 50:  # absolute minimum peak energy
+      peaks_valid = False
+    if strength_ratio < 0.2:  # one peak much weaker than the other
+      peaks_valid = False
+
+    # expose for debugging/consumer checks
+    self.histogram_peaks = (leftx_base, rightx_base)
+    self.histogram_peaks_valid = peaks_valid
+
+    # Return left, right and a validity flag
+    return leftx_base, rightx_base, peaks_valid
          
   def overlay_lane_lines(self, plot=False):
     """
@@ -762,13 +794,19 @@ def main():
   lane_obj.perspective_transform(plot=args.show_steps)
   lane_obj.calculate_histogram(plot=args.show_steps)
   left_fit, right_fit = lane_obj.get_lane_line_indices_sliding_windows(plot=args.show_steps)
-  lane_obj.get_lane_line_previous_window(left_fit, right_fit, plot=args.show_steps)
-  lane_obj.calculate_curvature()
-  lane_obj.calculate_car_position()
+  if left_fit is None or right_fit is None:
+    print("Ambiguous histogram peaks or single-lane visible; skipping detailed fit and falling back to annotated frame")
+  else:
+    lane_obj.get_lane_line_previous_window(left_fit, right_fit, plot=args.show_steps)
+    lane_obj.calculate_curvature()
+    lane_obj.calculate_car_position()
 
   overlay = lane_obj.overlay_lane_lines(plot=args.show_steps)
-  if overlay is None:
+  # If sliding-window was ambiguous, we didn't compute lane fits; avoid calling overlay routine
+  if left_fit is None or right_fit is None:
     overlay = original_frame.copy()
+  else:
+    overlay = lane_obj.overlay_lane_lines(plot=args.show_steps)
   annotated = lane_obj.display_curvature_offset(frame=overlay, plot=args.show_steps)
 
   if args.dump_dir:

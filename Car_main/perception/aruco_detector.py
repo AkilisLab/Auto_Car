@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import List, Optional, Tuple
 
 import cv2
 import cv2.aruco as aruco
+
+LOG = logging.getLogger(__name__)
 
 
 @dataclass
@@ -33,6 +36,8 @@ class ArUcoDetector:
     def detect(self, frame) -> List[DetectedMarker]:
         if frame is None:
             return []
+        height, width = frame.shape[:2]
+        roi = self._bottom_center_roi(width, height)
         corners, ids, rejected = self._detector.detectMarkers(frame)
         markers: List[DetectedMarker] = []
         if ids is None:
@@ -43,6 +48,9 @@ class ArUcoDetector:
             flat = marker_corners.reshape(-1, 2)
             points = [(int(x), int(y)) for x, y in flat]
             center = self._compute_center(points)
+            if not self._point_in_roi(center, roi):
+                LOG.debug("Marker %s outside ROI, skipping", marker_id)
+                continue
             markers.append(
                 DetectedMarker(
                     marker_id=marker_id,
@@ -87,3 +95,17 @@ class ArUcoDetector:
         if max_side == 0:
             return 0.0
         return min_side / max_side
+
+    @staticmethod
+    def _bottom_center_roi(width: int, height: int) -> Tuple[int, int, int, int]:
+        roi_width = int(width * 0.4)
+        roi_height = int(height * 0.4)
+        x0 = (width - roi_width) // 2
+        y0 = height - roi_height
+        return x0, y0, x0 + roi_width, y0 + roi_height
+
+    @staticmethod
+    def _point_in_roi(point: Tuple[int, int], roi: Tuple[int, int, int, int]) -> bool:
+        x, y = point
+        x0, y0, x1, y1 = roi
+        return x0 <= x <= x1 and y0 <= y <= y1
