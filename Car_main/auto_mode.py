@@ -131,6 +131,17 @@ class AutoModeController:
 		self._intersection_action_pending = False
 		self._pending_marker_hint: Optional[str] = None
 
+		# For IR polling and intersection tolerant detection
+		self._ir_buffer_size = 4  # (legacy, not used in new logic)
+		self._ir_state_buffer = [(0, 0, 0, 0)] * self._ir_buffer_size
+		self._ir_buffer_idx = 0
+		self._ir_poll_interval = 0.01  # 10ms polling
+		self._last_ir_poll_time = 0.0
+		# New: intersection tolerant flag
+		self._intersection_flag = False
+		self._intersection_flag_time = 0.0
+		self._intersection_flag_window = 0.2  # seconds to keep flag active after all-white
+
 	def run(self) -> None:
 		if not self.camera.open():
 			raise RuntimeError("Failed to open camera for auto mode")
@@ -139,21 +150,41 @@ class AutoModeController:
 
 		try:
 			# Core control loop: read sensors, maintain lane, react to intersections and markers
+			last_control_time = time.time()
 			while True:
-				ret, frame = self.camera.read(wait=True)
-				if not ret or frame is None:
-					time.sleep(0.01)
-					continue
+				now = time.time()
 
-				line_state = self._read_line_sensors()
-				is_all_white = bool(line_state == (1, 1, 1, 1)) if line_state is not None else False
-				self._is_at_intersection = is_all_white
-				if line_state is not None and line_state != self.last_line_state:
-					self.last_line_state = line_state
-					LOG.debug("IR line sensors: %s", line_state)
-					if is_all_white:
-						# All sensors see white: intersection detected, so pull the next planner action
-						LOG.info("IR sensors detected intersection (all sensors white)")
+				# --- Fast IR polling and intersection tolerant flag update ---
+				if now - self._last_ir_poll_time >= self._ir_poll_interval:
+					ir_state = self._read_line_sensors()
+					if ir_state is not None:
+						self._ir_state_buffer[self._ir_buffer_idx] = ir_state
+						self._ir_buffer_idx = (self._ir_buffer_idx + 1) % self._ir_buffer_size
+						all_white = (1, 1, 1, 1)
+						if ir_state == all_white:
+							self._intersection_flag = True
+							self._intersection_flag_time = now
+						elif self._intersection_flag and (now - self._intersection_flag_time > self._intersection_flag_window):
+							self._intersection_flag = False
+					self._last_ir_poll_time = now
+
+				# --- Main control logic at slower rate ---
+				if now - last_control_time >= self.control_interval:
+					ret, frame = self.camera.read(wait=True)
+					if not ret or frame is None:
+						time.sleep(0.01)
+						continue
+
+					# Intersection detection: trigger only on transition from inactive to active
+					prev_is_at_intersection = self._is_at_intersection
+					self._is_at_intersection = self._intersection_flag
+					current_ir_state = self._ir_state_buffer[(self._ir_buffer_idx - 1) % self._ir_buffer_size]
+					if current_ir_state != self.last_line_state:
+						self.last_line_state = current_ir_state
+						LOG.debug("IR line sensors: %s", current_ir_state)
+					if not prev_is_at_intersection and self._is_at_intersection:
+						# Intersection just detected (all four white simultaneously)
+						LOG.info("IR sensors detected intersection (tolerant, all sensors white)")
 						pending = self._next_planned_action()
 						if pending:
 							LOG.info("Upcoming planner action: %s", pending)
@@ -162,20 +193,21 @@ class AutoModeController:
 						LOG.info("Stopped at intersection for 5.0s to await marker/hint")
 						time.sleep(5.0)
 						self._intersection_action_pending = True
-					else:
+					elif not self._is_at_intersection:
 						self._intersection_action_pending = False
 
-				measurement = self._measure_lane(frame)
-				self._apply_control(measurement)
+					measurement = self._measure_lane(frame)
+					self._apply_control(measurement)
 
-				self._log_marker_detections(frame)
-				if self._intersection_action_pending:
-					self._handle_intersection()
+					self._log_marker_detections(frame)
+					if self._intersection_action_pending:
+						self._handle_intersection()
 
-				if self.show_debug:
-					self._show_debug_frame(measurement)
+					if self.show_debug:
+						self._show_debug_frame(measurement)
 
-				time.sleep(self.control_interval)
+					last_control_time = now
+				# No need for sleep here; loop is paced by IR polling and control interval
 		except KeyboardInterrupt:
 			LOG.info("Auto mode interrupted by user")
 		finally:
