@@ -98,11 +98,40 @@ class ArUcoDetector:
 
     @staticmethod
     def _bottom_center_roi(width: int, height: int) -> Tuple[int, int, int, int]:
-        roi_width = int(width * 0.4)
-        roi_height = int(height * 0.4)
-        x0 = (width - roi_width) // 2
-        y0 = height - roi_height
-        return x0, y0, x0 + roi_width, y0 + roi_height
+        """
+        Return an ROI rectangle expected to contain the ArUco marker.
+
+        The user provided a tight bounding polygon in counter-clockwise order
+        (top-left first) for the usual camera resolution of 640x480:
+            (111,89), (144,386), (448,375), (461,75)
+
+        To support different camera resolutions, scale those base coordinates
+        to the requested `width`/`height`. If the image matches 640x480 the
+        returned rectangle will be exactly the tight bounds for the marker.
+        """
+        # Base coordinates (reference resolution 640x480)
+        BASE_W, BASE_H = 640, 480
+        base_coords = [(111, 89), (144, 386), (448, 375), (461, 75)]
+
+        if width == BASE_W and height == BASE_H:
+            xs = [p[0] for p in base_coords]
+            ys = [p[1] for p in base_coords]
+        else:
+            sx = float(width) / float(BASE_W)
+            sy = float(height) / float(BASE_H)
+            xs = [int(p[0] * sx) for p in base_coords]
+            ys = [int(p[1] * sy) for p in base_coords]
+
+        x0 = min(xs)
+        y0 = min(ys)
+        x1 = max(xs)
+        y1 = max(ys)
+        # Clamp to image bounds
+        x0 = max(0, min(width - 1, x0))
+        x1 = max(0, min(width - 1, x1))
+        y0 = max(0, min(height - 1, y0))
+        y1 = max(0, min(height - 1, y1))
+        return x0, y0, x1, y1
 
     @staticmethod
     def _point_in_roi(point: Tuple[int, int], roi: Tuple[int, int, int, int]) -> bool:

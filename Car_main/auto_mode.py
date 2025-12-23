@@ -82,9 +82,9 @@ class AutoModeController:
 		# Map marker IDs to semantic hints for intersection or lane behavior
 		0: "start",
 		1: "goal",
-		2: "left_type_a",
-		3: "left_type_b",
-		4: "left_type_c",
+		2: "left",
+		3: "left",
+		4: "left",
 		5: "right",
 		6: "lane_change_left",
 		7: "lane_change_right",
@@ -395,8 +395,8 @@ class AutoModeController:
 							hint,
 						)
 						# Prime intersection-relevant markers seen shortly before an intersection
-						# Relevant hints: forward, right, left, left_type_*
-						if hint in {"forward", "left", "right"} or hint.startswith("left_type_"):
+						# Relevant hints: forward, right, left
+						if hint in {"forward", "left", "right"}:
 							self._primed_marker_hint = hint
 							self._primed_marker_time = time.time()
 						# Still handle outside-intersection immediate actions (lane changes/stop)
@@ -430,84 +430,23 @@ class AutoModeController:
 			LOG.info("Intersection detected but planner queue provided no action")
 			self._clear_pending_intersection()
 			return
-		marker_hint = self._interpret_marker_hint(self._last_marker_ids)
-		# Prefer an explicitly pending marker (detected at intersection), then immediate marker_hint,
-		# otherwise fall back to a recently-primed marker seen just before the intersection.
-		specific_hint = self._pending_marker_hint or marker_hint
-		if not specific_hint and self._primed_marker_hint:
-			# use primed marker only if within the allowed primed window
-			if time.time() - self._primed_marker_time <= self._primed_marker_window:
-				specific_hint = self._primed_marker_hint
-				LOG.info(
-					"Using primed marker hint '%s' seen %.2fs before intersection",
-					specific_hint,
-					time.time() - self._primed_marker_time,
-				)
-			# clear primed marker once consumed
-			self._primed_marker_hint = None
-		if specific_hint:
-			LOG.info("ArUco marker hint at intersection: %s", marker_hint)
-			if specific_hint.startswith("left_type_"):
-				if self._pending_action == "left":
-					LOG.info("Marker specifies %s, aligning with planner left turn", specific_hint)
-				else:
-					LOG.warning(
-						"Marker requests %s but planner expects %s",
-						specific_hint,
-						self._pending_action,
-					)
-			elif specific_hint in {"left", "right", "forward"}:
-				if marker_hint == self._pending_action:
-					LOG.info("Marker hint matches planner action '%s'", self._pending_action)
-				else:
-					LOG.warning(
-						"Marker hint %s differs from planner action %s",
-						specific_hint,
-						self._pending_action,
-					)
-			elif specific_hint in {"lane_change_left", "lane_change_right"}:
-				LOG.info("Marker requests %s around the intersection", specific_hint.replace("_", " "))
-			elif specific_hint == "stop":
-				LOG.info("Marker indicates stop; planner action remains %s", self._pending_action)
-			else:
-				LOG.debug("Marker hint %s recorded for telemetry", specific_hint)
+		# At intersections, prefer the planner's queued action rather than ArUco hints.
+		LOG.info("Executing planner action at intersection: %s", self._pending_action)
+		if self._raspbot is None:
+			LOG.warning("No Raspbot controller available to run %s", self._pending_action)
 		else:
-			LOG.info("No ArUco marker hint available at this intersection")
-		LOG.info("Executing planner action '%s' (placeholder)", self._pending_action)
-		if self._pending_action == "left":
-			variant = specific_hint if specific_hint and specific_hint.startswith("left_type_") else None
-			if variant:
-				# execute the detected left-turn variant
-				if self._raspbot is not None:
-					planned_maneuvers.run_action(variant, self._raspbot, camera=self.camera, show_debug=self.show_debug)
-				else:
-					LOG.warning("No Raspbot controller available to run %s", variant)
-			else:
-				# execute a default left-turn variant when planner requests a generic left
-				default_left = "left_type_b"
-				if self._raspbot is not None:
-					planned_maneuvers.run_action(default_left, self._raspbot, camera=self.camera, show_debug=self.show_debug)
-				else:
-					LOG.warning("No Raspbot controller available to run %s", default_left)
-		elif self._pending_action == "right":
-			variant = specific_hint if specific_hint == "right" else None
-			if variant:
-				if self._raspbot is not None:
-					planned_maneuvers.run_action("right", self._raspbot, camera=self.camera, show_debug=self.show_debug)
-				else:
-					LOG.warning("No Raspbot controller available to run right turn")
-			else:
-				if self._raspbot is not None:
-					planned_maneuvers.run_action("right", self._raspbot, camera=self.camera, show_debug=self.show_debug)
-				else:
-					LOG.warning("No Raspbot controller available to run right turn")
-		elif self._pending_action == "forward":
-			if self._raspbot is not None:
+			if self._pending_action == "left":
+				planned_maneuvers.run_action("left", self._raspbot, camera=self.camera, show_debug=self.show_debug)
+			elif self._pending_action == "right":
+				planned_maneuvers.run_action("right", self._raspbot, camera=self.camera, show_debug=self.show_debug)
+			elif self._pending_action == "forward":
 				planned_maneuvers.run_action("forward", self._raspbot, camera=self.camera, show_debug=self.show_debug)
+			elif self._pending_action in {"lane_change_left", "lane_change_right"}:
+				planned_maneuvers.run_action(self._pending_action, self._raspbot, camera=self.camera, show_debug=self.show_debug)
+			elif self._pending_action == "stop":
+				self.drive.stop()
 			else:
-				LOG.warning("No Raspbot controller available to run forward action")
-		else:
-			LOG.warning("Unknown planner action '%s'", self._pending_action)
+				LOG.warning("Unknown planner action '%s'", self._pending_action)
  
 		self._clear_pending_intersection()
 
@@ -548,9 +487,6 @@ class AutoModeController:
 		if not hints:
 			return None
 		for candidate in (
-			"left_type_a",
-			"left_type_b",
-			"left_type_c",
 			"left",
 			"right",
 			"forward",
