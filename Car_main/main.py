@@ -15,13 +15,15 @@ def choose_mode() -> str:
     choices = {
         "m": "manual",
         "a": "auto",
+        "l": "list_actions",
         "u": "audio",
         "q": "quit",
     }
     prompt = (
         "Choose control mode:\n"
         "  (m) manual\n"
-        "  (a) auto [partially implemented]\n"
+        "  (a) auto [map/planner]\n"
+        "  (l) list of intersection actions (no map)\n"
         "  (u) audio [not implemented]\n"
         "  (q) quit\n"
         "Enter choice: "
@@ -63,6 +65,7 @@ def main() -> None:
                 # If manual control raises, log and continue to chooser
                 logging.exception("manual_control raised an exception")
             continue
+
 
         # placeholders for other modes
         if mode == "auto":
@@ -163,6 +166,31 @@ def main() -> None:
                 "actions": actions,
             }
 
+            print("Starting auto mode with live camera")
+            controller = AutoModeController(show_debug=True)
+            controller.planned_route = planned_route
+            try:
+                controller.run()
+            except Exception:
+                logging.exception("Auto mode failed")
+            continue
+
+        if mode == "list_actions":
+            from auto_mode import AutoModeController
+            print("Enter a comma-separated list of intersection actions (e.g., forward,left,right):")
+            actions_input = input("Actions: ").strip()
+            if not actions_input:
+                print("No actions entered; aborting.")
+                continue
+            actions = [a.strip() for a in actions_input.split(",") if a.strip()]
+            intersections = list(range(len(actions)))
+            planned_route = {
+                "path": [],
+                "waypoints": [],
+                "intersections": intersections,
+                "actions": actions,
+            }
+            print(f"Ready: {len(actions)} intersections, actions={actions}")
             print("Starting auto mode with live camera")
             controller = AutoModeController(show_debug=True)
             controller.planned_route = planned_route

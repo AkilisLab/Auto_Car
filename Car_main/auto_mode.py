@@ -131,6 +131,12 @@ class AutoModeController:
 		self._intersection_action_pending = False
 		self._pending_marker_hint: Optional[str] = None
 
+		# Primed marker seen outside intersection to be used when arriving
+		self._primed_marker_hint: Optional[str] = None
+		self._primed_marker_time: float = 0.0
+		# How long a primed marker remains valid (seconds)
+		self._primed_marker_window: float = 2.0
+
 		# For IR polling and intersection tolerant detection
 		self._ir_buffer_size = 4  # (legacy, not used in new logic)
 		self._ir_state_buffer = [(0, 0, 0, 0)] * self._ir_buffer_size
@@ -259,12 +265,15 @@ class AutoModeController:
 				CORRECTION_TIME = 0.25  # Correction duration in seconds (increase for longer nudge)
 				COMPENSATE_RATIO = 0.7  # Compensation duration as a fraction of correction
 				if line_state is not None:
-					leftmost, _, _, rightmost = line_state
-					if rightmost:
+					l0, l1, l2, l3 = line_state
+					# Improved trigger: require outer sensor plus its adjacent inner sensor
+					# to indicate a real drift (avoids reacting to arrows/markings that only
+					# briefly touch the outermost sensor).
+					if l3 == 1 and l2 == 0:
 						# Nudge left
 						left_nudge = max(0, slow_speed - CORRECTION)
 						right_nudge = min(self.max_speed, slow_speed + CORRECTION)
-						LOG.debug("IR fallback: rightmost sensor white, nudging left")
+						LOG.debug("IR fallback: right-side drift detected (l2=0,l3=1), nudging left")
 						self.drive.set_speeds(left_nudge, right_nudge)
 						time.sleep(CORRECTION_TIME)
 						self.drive.stop()
@@ -275,11 +284,11 @@ class AutoModeController:
 						self.drive.set_speeds(comp_left, comp_right)
 						time.sleep(CORRECTION_TIME * COMPENSATE_RATIO)
 						self.drive.stop()
-					elif leftmost:
+					elif l0 == 1 and l1 == 0:
 						# Nudge right
 						left_nudge = min(self.max_speed, slow_speed + CORRECTION)
 						right_nudge = max(0, slow_speed - CORRECTION)
-						LOG.debug("IR fallback: leftmost sensor white, nudging right")
+						LOG.debug("IR fallback: left-side drift detected (l0=1,l1=0), nudging right")
 						self.drive.set_speeds(left_nudge, right_nudge)
 						time.sleep(CORRECTION_TIME)
 						self.drive.stop()
@@ -385,6 +394,12 @@ class AutoModeController:
 							marker.marker_id,
 							hint,
 						)
+						# Prime intersection-relevant markers seen shortly before an intersection
+						# Relevant hints: forward, right, left, left_type_*
+						if hint in {"forward", "left", "right"} or hint.startswith("left_type_"):
+							self._primed_marker_hint = hint
+							self._primed_marker_time = time.time()
+						# Still handle outside-intersection immediate actions (lane changes/stop)
 						self._handle_marker_hint_outside_intersection(hint)
 
 	def _next_planned_action(self) -> Optional[str]:
@@ -416,7 +431,20 @@ class AutoModeController:
 			self._clear_pending_intersection()
 			return
 		marker_hint = self._interpret_marker_hint(self._last_marker_ids)
+		# Prefer an explicitly pending marker (detected at intersection), then immediate marker_hint,
+		# otherwise fall back to a recently-primed marker seen just before the intersection.
 		specific_hint = self._pending_marker_hint or marker_hint
+		if not specific_hint and self._primed_marker_hint:
+			# use primed marker only if within the allowed primed window
+			if time.time() - self._primed_marker_time <= self._primed_marker_window:
+				specific_hint = self._primed_marker_hint
+				LOG.info(
+					"Using primed marker hint '%s' seen %.2fs before intersection",
+					specific_hint,
+					time.time() - self._primed_marker_time,
+				)
+			# clear primed marker once consumed
+			self._primed_marker_hint = None
 		if specific_hint:
 			LOG.info("ArUco marker hint at intersection: %s", marker_hint)
 			if specific_hint.startswith("left_type_"):
@@ -451,31 +479,31 @@ class AutoModeController:
 			if variant:
 				# execute the detected left-turn variant
 				if self._raspbot is not None:
-					planned_maneuvers.run_action(variant, self._raspbot)
+					planned_maneuvers.run_action(variant, self._raspbot, camera=self.camera, show_debug=self.show_debug)
 				else:
 					LOG.warning("No Raspbot controller available to run %s", variant)
 			else:
 				# execute a default left-turn variant when planner requests a generic left
 				default_left = "left_type_b"
 				if self._raspbot is not None:
-					planned_maneuvers.run_action(default_left, self._raspbot)
+					planned_maneuvers.run_action(default_left, self._raspbot, camera=self.camera, show_debug=self.show_debug)
 				else:
 					LOG.warning("No Raspbot controller available to run %s", default_left)
 		elif self._pending_action == "right":
 			variant = specific_hint if specific_hint == "right" else None
 			if variant:
 				if self._raspbot is not None:
-					planned_maneuvers.run_action("right", self._raspbot)
+					planned_maneuvers.run_action("right", self._raspbot, camera=self.camera, show_debug=self.show_debug)
 				else:
 					LOG.warning("No Raspbot controller available to run right turn")
 			else:
 				if self._raspbot is not None:
-					planned_maneuvers.run_action("right", self._raspbot)
+					planned_maneuvers.run_action("right", self._raspbot, camera=self.camera, show_debug=self.show_debug)
 				else:
 					LOG.warning("No Raspbot controller available to run right turn")
 		elif self._pending_action == "forward":
 			if self._raspbot is not None:
-				planned_maneuvers.run_action("forward", self._raspbot)
+				planned_maneuvers.run_action("forward", self._raspbot, camera=self.camera, show_debug=self.show_debug)
 			else:
 				LOG.warning("No Raspbot controller available to run forward action")
 		else:
@@ -486,12 +514,12 @@ class AutoModeController:
 	def _handle_marker_hint_outside_intersection(self, hint: str) -> None:
 		if hint == "lane_change_left":
 			if self._raspbot is not None:
-				planned_maneuvers.run_action("lane_change_left", self._raspbot)
+				planned_maneuvers.run_action("lane_change_left", self._raspbot, camera=self.camera, show_debug=self.show_debug)
 			else:
 				LOG.warning("No Raspbot controller available to run lane_change_left")
 		elif hint == "lane_change_right":
 			if self._raspbot is not None:
-				planned_maneuvers.run_action("lane_change_right", self._raspbot)
+				planned_maneuvers.run_action("lane_change_right", self._raspbot, camera=self.camera, show_debug=self.show_debug)
 			else:
 				LOG.warning("No Raspbot controller available to run lane_change_right")
 		elif hint == "stop":
