@@ -19,7 +19,17 @@ if _car_main_dir not in sys.path:
 from devices.camera_node import Camera
 from perception.lane import Lane
 
+#####
 # Step tuple encodes differential drive command: (left_dir, left_speed, right_dir, right_speed, duration)
+#####
+# ArUco marker ID usage plan:
+#   - ID 0: primary left/forward (currently triggers all turns for safety)
+#   - ID 2: second left turn type (to be used for alternate left at intersection)
+#   - ID 8: second forward type (to be used for alternate forward at intersection)
+#   - ID 3, 4: also mapped to left in ARUCO_ACTION_HINTS (see auto_mode.py)
+#   - ID 6: lane_change_left
+#   - (Update drive_until_marker and action logic to use these as needed)
+#####
 Step = Tuple[int, int, int, int, float]
 
 
@@ -245,35 +255,6 @@ def spin_until_lane(bot: Any, direction: str = "left", camera: Camera = None, ti
 		init_speed = max(40, int(spin_speed * 1.8))
 	# fine search speed derived from main spin_speed
 	fine_speed = max(6, int(spin_speed * fine_speed_factor))
-	# Initial burst commented out for stability
-	# if init_duration and init_duration > 0:
-	# 	print(f"Initial burst: dir={direction} speed={init_speed} dur={init_duration:.2f}s")
-	# 	if direction == "left":
-	# 		b_ldir, b_rdir = 1, 0
-	# 	else:
-	# 		b_ldir, b_rdir = 0, 1
-	# 	for motor_id in (0, 1):
-	# 		bot.Ctrl_Car(motor_id, b_ldir, init_speed)
-	# 	for motor_id in (2, 3):
-	# 		bot.Ctrl_Car(motor_id, b_rdir, init_speed)
-	# 	time.sleep(init_duration)
-	# 	_stop(bot)
-
-	# Blind spin and detection delay commented out for stability
-	# blind_spin_time = 0.18  # seconds (tunable)
-	# print(f"Blind spin: {blind_spin_time:.2f}s with no lane detection")
-	# if direction == "left":
-	# 	ldir_blind, rdir_blind = 1, 0
-	# else:
-	# 	ldir_blind, rdir_blind = 0, 1
-	# t_blind_end = time.time() + blind_spin_time
-	# while time.time() < t_blind_end:
-	# 	for motor_id in (0, 1):
-	# 		bot.Ctrl_Car(motor_id, ldir_blind, spin_speed)
-	# 	for motor_id in (2, 3):
-	# 		bot.Ctrl_Car(motor_id, rdir_blind, spin_speed)
-	# 	time.sleep(0.01)
-	# _stop(bot)
 
 	end_time = time.time() + timeout
 	# motor directions for a pivot-in-place
@@ -503,11 +484,14 @@ def spin_until_lane(bot: Any, direction: str = "left", camera: Camera = None, ti
 
 
 def drive_until_marker(bot: Any, camera: Camera = None, marker_ids: Optional[List[int]] = None, forward_speed: int = FORWARD_SPEED, check_interval: float = 0.05, timeout: Optional[float] = 6.0, show_debug: bool = False) -> None:
-	"""
-	Drive forward (open-loop) until an ArUco marker is detected inside the detector ROI.
-	If `camera` is None, performs a timed forward run for `timeout` seconds (if provided).
-	`marker_ids` can be a list of acceptable marker ids; if None any detected marker will stop the drive.
-	"""
+	#####
+	# Drive forward (open-loop) until an ArUco marker is detected inside the detector ROI.
+	# If `camera` is None, performs a timed forward run for `timeout` seconds (if provided).
+	# `marker_ids` can be a list of acceptable marker ids; if None any detected marker will stop the drive.
+	#
+	# Current logic: only marker id 0 triggers a stop for safety.
+	# Planned: use id 2 for a second left type, id 8 for a second forward type.
+	#####
 	if bot is None:
 		raise RuntimeError("Raspbot hardware unavailable; aborting drive_until_marker")
 	# If no camera, fallback to timed forward (so caller doesn't block forever)
@@ -560,22 +544,55 @@ def drive_until_marker(bot: Any, camera: Camera = None, marker_ids: Optional[Lis
 
 
 
+#####
+# ACTION_STEPS: defines maneuver sequences for each planner action.
+#
+#   - "left":
+#       - drive_until_marker (marker id 0; plan: id 0 = primary left)
+#       - short forward
+#       - spin_until_lane (left)
+#   - "left2":
+#       - drive_until_marker (marker id 2; plan: id 2 = alternate left)
+#       - short forward
+#       - spin_until_lane (left)
+#   - "right":
+#       - drive_until_marker (marker id 0)
+#       - short forward
+#       - spin_until_lane (right)
+#   - "forward":
+#       - forward_lanekeep (lane following)
+#   - "forward2":
+#       - drive_until_marker (marker id 8; plan: id 8 = alternate forward)
+#       - short forward
+#       - forward_lanekeep
+#   - "lane_change_left":
+#       - forward_lanekeep, arc left, forward_lanekeep, arc right
+#   - "lane_change_right":
+#       - forward_lanekeep, arc right, forward_lanekeep, arc left
+#####
 ACTION_STEPS = {
 	"left": (
-		# ("forward_lanekeep", {"duration": SHORT_FORWARD_TIME}),
-		("drive_until_marker", {"marker_ids": None, "timeout": 8.0}),
+		("drive_until_marker", {"marker_ids": [0], "timeout": 8.0}),
 		(0, int(FORWARD_SPEED * 1.0), 0, int(FORWARD_SPEED * 1.0), 0.25),
 		("spin_until_lane", {"direction": "left", "timeout": SPIN_TIME * 3, "spin_speed": SPIN_SPEED}),
 	),
+	"left2": (
+		("drive_until_marker", {"marker_ids": [2], "timeout": 8.0}),
+		(0, int(FORWARD_SPEED * 1.0), 0, int(FORWARD_SPEED * 1.0), 0.25),
+		("spin_until_lane", {"direction": "left", "timeout": SPIN_TIME * 3, "spin_speed": SPIN_SPEED}),
+		(0, int(FORWARD_SPEED * 1.0), 0, int(FORWARD_SPEED * 1.0), 0.25)
+	),
 	"right": (
-		# ("forward_lanekeep", {"duration": SHORT_FORWARD_TIME}),
-		("drive_until_marker", {"marker_ids": None, "timeout": 8.0}),
+		("drive_until_marker", {"marker_ids": [0], "timeout": 8.0}),
 		(0, int(FORWARD_SPEED * 1.0), 0, int(FORWARD_SPEED * 1.0), 0.25),
 		("spin_until_lane", {"direction": "right", "timeout": SPIN_TIME * 3, "spin_speed": SPIN_SPEED}),
 	),
-	# Use lane-keeping forward action (will use camera when provided to run_action)
 	"forward": (
 		("forward_lanekeep", {"duration": LONG_FORWARD_TIME}),
+	),
+	"forward2": (
+		("drive_until_marker", {"marker_ids": [8], "timeout": 8.0}),
+		(0, int(FORWARD_SPEED * 1.0), 0, int(FORWARD_SPEED * 1.0), 1.5),  # open-loop forward for 1.5s (tunable)
 	),
 	"lane_change_left": (
 		("forward_lanekeep", {"duration": SHORT_FORWARD_TIME}),
@@ -602,12 +619,47 @@ def run_action(action_name: str, bot: Any, camera: Camera = None, show_debug: bo
 	If `camera` is provided, certain actions (like `forward_lanekeep`) will
 	use it for lane detection; otherwise they fall back to open-loop behavior.
 	"""
+	# Allow dynamic override of action_name based on marker reading results
+	# If the action is left/forward and a marker is detected, switch to left2/forward2 as needed
+	orig_action_name = action_name
+	if action_name in ("left", "forward"):
+		# Try to detect marker before running steps
+		marker_override = None
+		if camera is not None:
+			try:
+				from perception.aruco_detector import ArUcoDetector
+				detector = ArUcoDetector(show_debug=show_debug)
+				ret, frame = camera.read(wait=True)
+				if ret and frame is not None:
+					markers = detector.detect(frame)
+					ids = [m.marker_id for m in markers] if markers else []
+					if action_name == "left" and 2 in ids:
+						marker_override = "left2"
+					elif action_name == "forward" and 8 in ids:
+						marker_override = "forward2"
+			except Exception:
+				pass
+		if marker_override:
+			print(f"\n>>> [ACTION SELECT] Overriding action '{action_name}' to '{marker_override}' based on marker detection! <<<\n")
+			action_name = marker_override
 	try:
 		steps = ACTION_STEPS[action_name]
 	except KeyError as exc:
 		raise ValueError(f"Unknown action '{action_name}'") from exc
-	print(f"Executing action '{action_name}'")
+	print(f"\n>>> [ACTION EXECUTE] ===> Now executing action: '{action_name.upper()}' <===\n")
 	for step in steps:
+		# Special handling for 'forward2': skip lane keeping, only execute open-loop steps
+		if action_name == "forward2":
+			if isinstance(step, tuple) and len(step) == 2 and isinstance(step[0], str):
+				func_name, kwargs = step
+				if func_name == "drive_until_marker":
+					kwargs.setdefault("show_debug", show_debug)
+					drive_until_marker(bot, camera=camera, **kwargs)
+			elif isinstance(step, tuple):
+				_execute_steps(bot, [step])
+			else:
+				raise ValueError(f"Invalid step in ACTION_STEPS: {step}")
+			continue
 		# Callable-style step: ("name", kwargs)
 		if isinstance(step, tuple) and len(step) == 2 and isinstance(step[0], str):
 			func_name, kwargs = step
@@ -619,9 +671,13 @@ def run_action(action_name: str, bot: Any, camera: Camera = None, show_debug: bo
 			elif func_name == "spin_until_lane":
 				# spin until both lanes visible or timeout
 				kwargs.setdefault("show_debug", show_debug)
-				# For left spins, disable detection delay (start lane detection immediately)
+				# For left spins, set detection delay based on action type
 				if kwargs.get("direction") == "left":
-					kwargs["detect_delay"] = 0.0
+					# Use 0.0 for 'left', 0.7 for 'left2'
+					if action_name == "left2":
+						kwargs["detect_delay"] = 1.2
+					else:
+						kwargs["detect_delay"] = 0.6
 				# For right spins, use a larger detection delay
 				elif kwargs.get("direction") == "right":
 					kwargs["detect_delay"] = 1.2
